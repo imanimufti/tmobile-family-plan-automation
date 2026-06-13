@@ -223,15 +223,35 @@ class SmsSource(PaymentSource):
 
     @staticmethod
     def _parse_venmo_sms(rowid: int, sender: str, text: str, ts: str) -> Optional[Dict]:
-        # Hook for future Venmo SMS transaction notifications. Conservative regex.
-        pattern = r'(.+?)\s+paid you\s+\$?([\d,]+(?:\.\d{2})?)'
-        m = re.search(pattern, text, re.IGNORECASE)
-        if not m:
+        # Try several known Venmo SMS shapes. Whichever matches first wins.
+        # Skip auth codes and welcome blurbs.
+        if re.search(r'\bcode\b|never share|welcome to venmo', text, re.IGNORECASE):
+            return None
+
+        patterns = [
+            r'(.+?)\s+paid you\s+\$?([\d,]+(?:\.\d{2})?)',                       # "X paid you $Y"
+            r'you received\s+\$?([\d,]+(?:\.\d{2})?)\s+from\s+(.+?)(?:[.,(\n]|$)',# "You received $Y from X"
+            r'\$?([\d,]+(?:\.\d{2})?)\s+(?:received )?from\s+(.+?)\s+(?:via|on)\s+Venmo',
+        ]
+        amount = name = None
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if not m:
+                continue
+            g1, g2 = m.group(1), m.group(2)
+            # First pattern: (name, amount). Others: (amount, name).
+            if re.match(r'^\$?[\d,]+', g1):
+                amount, name = g1, g2
+            else:
+                name, amount = g1, g2
+            break
+
+        if not amount or not name:
             return None
         return {
             'source': 'venmo_sms',
-            'amount': float(m.group(2).replace(',', '')),
-            'sender_name': m.group(1).strip(),
+            'amount': float(amount.replace(',', '').replace('$', '')),
+            'sender_name': name.strip().lstrip('@'),
             'sender_phone': None,
             'raw_id': f"sms:{rowid}",
             'subject': text[:120],
