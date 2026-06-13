@@ -1,5 +1,5 @@
 {
-  "google_sheet_id": "1vwUSumnGaucB8T21iLcd7bgokiemVa6N8hG-wO_1Hjc",
+  "google_sheet_id": "16NGafLIxbcoQgzNdiQAKvMtXDRRhipb1UujoYqY1pXU",
   "phone_to_name_mapping": {
     "3033": "Ahmad",
     "4321": "Iqra",
@@ -14,5 +14,11 @@
     "7333": "Shahzaib",
     "0959": "Imani Internet",
     "8507": "Waleed"
+  },
+  "sms": {
+    "chat_db_path": "~/Library/Messages/chat.db",
+    "zelle_senders": ["20736"],
+    "venmo_senders": ["86753"],
+    "sms_payer_aliases": {}
   }
 }
