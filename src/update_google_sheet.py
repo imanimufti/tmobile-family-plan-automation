@@ -144,13 +144,22 @@ class GoogleSheetsUpdater:
             raise
 
     def format_sheet_header(self, tab_name: str):
-        """Format the header row with proper styling"""
+        """Format the header row with proper styling + set column widths so the
+        Drive PDF export renders without truncated headers."""
+        sheet_id = self.get_sheet_id(tab_name)
+
+        # Per-column widths chosen to fit the longest header without truncation.
+        # Columns: A Name, B Account, C Equal portion of bill, D Recurring Extras,
+        # E Extras, F Credit, G Total per person, H Payment Status, I Notes,
+        # J (spacer), K summary label, L summary value
+        column_widths = [120, 80, 150, 130, 80, 80, 130, 130, 280, 20, 230, 90]
+
         requests = [
             # Format header row (bold, background color)
             {
                 'repeatCell': {
                     'range': {
-                        'sheetId': self.get_sheet_id(tab_name),
+                        'sheetId': sheet_id,
                         'startRowIndex': 0,
                         'endRowIndex': 1
                     },
@@ -167,13 +176,28 @@ class GoogleSheetsUpdater:
             {
                 'updateSheetProperties': {
                     'properties': {
-                        'sheetId': self.get_sheet_id(tab_name),
+                        'sheetId': sheet_id,
                         'gridProperties': {'frozenRowCount': 1}
                     },
                     'fields': 'gridProperties.frozenRowCount'
                 }
-            }
+            },
         ]
+
+        # One updateDimensionProperties per column
+        for idx, width in enumerate(column_widths):
+            requests.append({
+                'updateDimensionProperties': {
+                    'range': {
+                        'sheetId': sheet_id,
+                        'dimension': 'COLUMNS',
+                        'startIndex': idx,
+                        'endIndex': idx + 1,
+                    },
+                    'properties': {'pixelSize': width},
+                    'fields': 'pixelSize',
+                }
+            })
 
         self.service.spreadsheets().batchUpdate(
             spreadsheetId=self.sheet_id,

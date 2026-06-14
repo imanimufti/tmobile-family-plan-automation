@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -32,21 +33,26 @@ except ImportError:
     from googleapiclient.errors import HttpError
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    import pymupdf
 except ImportError:
-    print("Pillow not installed. Installing...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
-    from PIL import Image, ImageDraw, ImageFont
+    print("PyMuPDF not installed. Installing...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pymupdf"])
+    import pymupdf
 
+import urllib.request
 
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive.readonly',
 ]
 
 
 def authenticate(credentials_path: str = "credentials.json"):
-    """Return a Sheets service. Mirrors GoogleSheetsUpdater.authenticate."""
+    """Return (sheets_service, creds). Mirrors GoogleSheetsUpdater.authenticate
+    but exposes the raw Credentials so callers can hit the Drive export URL
+    directly with a bearer token.
+    """
     creds_file = Path(credentials_path)
     if not creds_file.exists():
         raise FileNotFoundError(
@@ -65,18 +71,27 @@ def authenticate(credentials_path: str = "credentials.json"):
         token_path = Path("token.json")
         if token_path.exists():
             creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            # Token was issued with a narrower scope set (e.g. before drive.readonly
+            # was added) — force a fresh OAuth flow so the new scope is granted.
+            if creds and not set(SCOPES).issubset(set(creds.scopes or [])):
+                print("OAuth scopes changed (drive.readonly added) — re-authenticating...")
+                token_path.unlink()
+                creds = None
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
+                try:
+                    creds.refresh(Request())
+                except Exception:
+                    creds = None
+            if not creds:
                 flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
                 creds = flow.run_local_server(port=0)
             with open(token_path, 'w') as token:
                 token.write(creds.to_json())
         print("Authenticated using OAuth")
 
-    return build('sheets', 'v4', credentials=creds)
+    return build('sheets', 'v4', credentials=creds), creds
 
 
 def fetch_tab_data(sheets, spreadsheet_id: str, tab_name: str) -> Dict:
@@ -111,90 +126,70 @@ def fetch_tab_data(sheets, spreadsheet_id: str, tab_name: str) -> Dict:
     }
 
 
-def render_sheet_as_png(rows: List[List[str]], tab_name: str,
-                        bill_total_display: str, others_owe_display: str,
-                        output_path: str) -> None:
-    """Render the per-person breakdown table as a PNG suitable for sharing."""
-    # (label, source column index in A:L, pixel width)
-    columns = [
-        ('Name',             0, 180),
-        ('Equal Portion',    2, 130),
-        ('Recurring Extras', 3, 160),
-        ('Extras',           4, 100),
-        ('Total',            6, 110),
-        ('Status',           7, 100),
-    ]
+def export_tab_as_png(creds, spreadsheet_id: str, gid: int,
+                      output_path: str, dpi: int = 180,
+                      cell_range: str = 'A1:L15') -> None:
+    """Fetch the target tab as PDF via Google's export endpoint, render to PNG
+    with PyMuPDF, then crop to the actual content bbox so the result is a tight
+    table image — not a letter-page with the table in the corner.
 
-    # Filter to renderable data rows: drop header (row 0), drop the 'Total' summary row
-    data_rows: List[List[str]] = []
-    for row in rows[1:]:
-        if not row or row[0] == 'Total':
-            continue
-        padded = list(row) + [''] * (12 - len(row))
-        data_rows.append([padded[idx] for _, idx, _ in columns])
+    Requires drive.readonly OAuth scope so the bearer token can authenticate.
+    Landscape orientation prevents column-header truncation.
+    """
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
 
-    table_width = sum(w for _, _, w in columns)
-    margin = 20
-    width = table_width + margin * 2
-    row_height = 38
-    title_area = 90
-    table_header_height = 44
-    height = title_area + table_header_height + len(data_rows) * row_height + margin
+    params = {
+        'format':       'pdf',
+        'gid':          str(gid),
+        'portrait':     'false',   # landscape — more horizontal room for column headers
+        'size':         'letter',
+        'fitw':         'true',
+        'gridlines':    'true',
+        'printtitle':   'false',
+        'pagenumbers':  'false',
+        'sheetnames':   'false',
+        'range':        cell_range,
+        'top_margin':   '0.25',
+        'bottom_margin':'0.25',
+        'left_margin':  '0.25',
+        'right_margin': '0.25',
+        'frozenrows':   '0',      # don't repeat the header on every page
+        'frozencols':   '0',
+    }
+    query = '&'.join(f"{k}={v}" for k, v in params.items())
+    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?{query}"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {creds.token}'})
 
-    img = Image.new('RGB', (width, height), color='white')
-    draw = ImageDraw.Draw(img)
+    with urllib.request.urlopen(req) as resp:
+        pdf_bytes = resp.read()
 
-    font_path = '/System/Library/Fonts/Helvetica.ttc'
-    title_font = ImageFont.truetype(font_path, 22)
-    subtitle_font = ImageFont.truetype(font_path, 15)
-    header_font = ImageFont.truetype(font_path, 13)
-    body_font = ImageFont.truetype(font_path, 13)
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+    page = doc[0]
 
-    draw.text((margin, 15), f"T-Mobile Family Plan — {tab_name}",
-              fill='#1a1a1a', font=title_font)
-    summary_bits = []
-    if bill_total_display:
-        summary_bits.append(f"Bill Total: {bill_total_display}")
-    if others_owe_display:
-        summary_bits.append(f"Others Owe: {others_owe_display}")
-    draw.text((margin, 50), '    '.join(summary_bits),
-              fill='#555', font=subtitle_font)
+    # Find the bbox of actual content (text blocks) so we crop out the
+    # letter-page whitespace below the table.
+    blocks = page.get_text("blocks")
+    if blocks:
+        xs0 = [b[0] for b in blocks]
+        ys0 = [b[1] for b in blocks]
+        xs1 = [b[2] for b in blocks]
+        ys1 = [b[3] for b in blocks]
+        pad = 6  # points of breathing room around the table
+        clip = pymupdf.Rect(
+            max(0, min(xs0) - pad),
+            max(0, min(ys0) - pad),
+            min(page.rect.width, max(xs1) + pad),
+            min(page.rect.height, max(ys1) + pad),
+        )
+    else:
+        clip = page.rect
 
-    # Table header
-    y = title_area
-    draw.rectangle([margin, y, margin + table_width, y + table_header_height],
-                   fill='#e8e8e8')
-    x = margin
-    for label, _, col_w in columns:
-        draw.text((x + 10, y + 14), label, fill='#222', font=header_font)
-        x += col_w
-    draw.line([margin, y + table_header_height,
-               margin + table_width, y + table_header_height],
-              fill='#bbb', width=1)
-
-    # Data rows
-    y += table_header_height
-    for i, row_data in enumerate(data_rows):
-        bg = '#fafafa' if i % 2 == 0 else 'white'
-        draw.rectangle([margin, y, margin + table_width, y + row_height], fill=bg)
-        x = margin
-        for j, (label, _, col_w) in enumerate(columns):
-            text = row_data[j] if j < len(row_data) else ''
-            color = '#1a1a1a'
-            if label == 'Status':
-                lower = text.lower()
-                if lower == 'paid':
-                    color = '#1e7d2c'
-                elif lower == 'pending':
-                    color = '#b06800'
-            draw.text((x + 10, y + 11), text, fill=color, font=body_font)
-            x += col_w
-        y += row_height
-
-    draw.rectangle([margin, title_area, margin + table_width, y],
-                   outline='#bbb', width=1)
-
-    img.save(output_path)
+    scale = dpi / 72.0
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), clip=clip)
+    pix.save(output_path)
+    doc.close()
 
 
 def copy_image_to_clipboard(image_path: str) -> None:
@@ -250,6 +245,52 @@ def send_via_applescript(open_delay: float = 4.0, after_paste_delay: float = 1.0
     subprocess.run(['osascript', '-e', script], check=True)
 
 
+def send_image_with_caption_via_applescript(
+    image_path: str,
+    caption: str,
+    open_delay: float = 4.0,
+    preview_delay: float = 2.5,
+    caption_delay: float = 1.0,
+) -> None:
+    """Paste an image, then a text caption, into WhatsApp Desktop's media preview
+    dialog, then send the combined message.
+
+    WhatsApp Desktop's media-preview dialog focuses the caption field after
+    paste, so we:
+      1. Set image on the clipboard and ⌘V (preview opens)
+      2. Swap clipboard to the caption text and ⌘V (fills the caption field)
+      3. ⌘Return to send (Return alone usually adds a newline in the caption)
+    """
+    # 1. Image on clipboard
+    copy_image_to_clipboard(image_path)
+
+    # 2. Activate WhatsApp + paste image to open the preview dialog
+    paste_image = f'''
+    tell application "WhatsApp" to activate
+    delay {open_delay}
+    tell application "System Events"
+        keystroke "v" using {{command down}}
+    end tell
+    '''
+    subprocess.run(['osascript', '-e', paste_image], check=True)
+
+    # Give the preview dialog time to render and focus the caption field
+    time.sleep(preview_delay)
+
+    # 3. Swap clipboard to caption text
+    copy_to_clipboard(caption)
+
+    # 4. Paste caption into focused caption field, then send with ⌘Return
+    paste_and_send = f'''
+    tell application "System Events"
+        keystroke "v" using {{command down}}
+        delay {caption_delay}
+        keystroke return using {{command down}}
+    end tell
+    '''
+    subprocess.run(['osascript', '-e', paste_and_send], check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Share the Google Sheet breakdown for a given month to WhatsApp')
@@ -283,7 +324,7 @@ def main():
         print("Error: whatsapp.message_template is missing from config.json")
         sys.exit(1)
 
-    sheets = authenticate(args.credentials)
+    sheets, creds = authenticate(args.credentials)
     data = fetch_tab_data(sheets, spreadsheet_id, args.tab_name)
     sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={data['gid']}"
 
@@ -293,17 +334,13 @@ def main():
     print(message)
     print("=" * 60)
 
-    # Render screenshot (default on)
+    # Export tab as PDF via Drive and render to PNG (default on)
     png_path: Optional[str] = None
     if not args.no_screenshot:
         slug = args.tab_name.replace(' ', '_')
         png_path = str(Path(tempfile.gettempdir()) / f"tmobile-{slug}.png")
-        render_sheet_as_png(
-            data['rows'], args.tab_name,
-            data['bill_total_display'], data['others_owe_display'],
-            png_path,
-        )
-        print(f"\n✓ Screenshot rendered: {png_path}")
+        export_tab_as_png(creds, spreadsheet_id, data['gid'], png_path)
+        print(f"\n✓ Screenshot exported from Google Sheets: {png_path}")
 
     if args.render_only:
         print("[render-only] Exiting before clipboard/WhatsApp.")
@@ -319,45 +356,41 @@ def main():
     else:
         print("✓ Opened WhatsApp Desktop (pick the group manually)")
 
-    # Send the screenshot first so the text-with-link follows as a separate message.
-    sent_image = False
     if png_path:
-        copy_image_to_clipboard(png_path)
-        print("✓ Screenshot copied to clipboard")
+        # Single message: image with the text/link as its caption.
         if args.no_send:
-            print("→ Paste with ⌘V (image preview opens), then Enter to send")
-            print("  After it sends, the text message will be staged next — rerun without --no-send.")
-        else:
-            print(f"→ Sending screenshot in ~{args.open_delay:.0f}s...")
-            try:
-                # Image paste opens a preview dialog; give it extra time before Enter.
-                send_via_applescript(open_delay=args.open_delay, after_paste_delay=2.5)
-                sent_image = True
-                print("✓ Screenshot sent")
-            except subprocess.CalledProcessError as e:
-                print(f"✗ AppleScript send failed: {e}")
-                print("  Falling back to manual paste — image is on your clipboard.")
-                print("  If this is the first run, grant Accessibility permission:")
-                print("    System Settings → Privacy & Security → Accessibility")
-                sys.exit(1)
-
-    copy_to_clipboard(message)
-    print("✓ Text message copied to clipboard")
-
-    if args.no_send:
-        print("→ Paste with ⌘V, then Enter to send the link message")
-        return
-
-    # WhatsApp already focused on the group; only a short re-focus delay is needed.
-    text_open_delay = 1.5 if sent_image else args.open_delay
-    print(f"→ Sending text message in ~{text_open_delay:.1f}s...")
-    try:
-        send_via_applescript(open_delay=text_open_delay, after_paste_delay=1.0)
-        print("✓ Text message sent")
-    except subprocess.CalledProcessError as e:
-        print(f"✗ AppleScript send failed: {e}")
-        print("  Text message is on your clipboard — paste manually with ⌘V + Enter.")
-        sys.exit(1)
+            copy_image_to_clipboard(png_path)
+            print("✓ Screenshot copied to clipboard")
+            print("→ ⌘V to paste image (preview opens), type/paste your caption, ⌘Return to send")
+            return
+        print(f"→ Sending image + caption in ~{args.open_delay:.0f}s...")
+        try:
+            send_image_with_caption_via_applescript(
+                png_path, message,
+                open_delay=args.open_delay,
+            )
+            print("✓ Sent image with caption")
+        except subprocess.CalledProcessError as e:
+            print(f"✗ AppleScript send failed: {e}")
+            print("  Image was on your clipboard; the caption text is now there.")
+            print("  If this is the first run, grant Accessibility permission:")
+            print("    System Settings → Privacy & Security → Accessibility")
+            sys.exit(1)
+    else:
+        # Text-only fallback (--no-screenshot)
+        copy_to_clipboard(message)
+        print("✓ Text message copied to clipboard")
+        if args.no_send:
+            print("→ Paste with ⌘V, then Enter to send the link message")
+            return
+        print(f"→ Sending text message in ~{args.open_delay:.0f}s...")
+        try:
+            send_via_applescript(open_delay=args.open_delay, after_paste_delay=1.0)
+            print("✓ Text message sent")
+        except subprocess.CalledProcessError as e:
+            print(f"✗ AppleScript send failed: {e}")
+            print("  Text message is on your clipboard — paste manually with ⌘V + Enter.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
