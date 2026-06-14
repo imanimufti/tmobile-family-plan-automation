@@ -275,12 +275,21 @@ class GoogleSheetsUpdater:
         # Add summary info (starting from column I to avoid interfering with data)
         values[0].extend(['', 'Bill Total:', f"${bill_data['total_due']:.2f}"])
 
-        # Calculate total payment due from others (excluding the account holder)
-        total_from_others = sum(
-            line.get('total_per_person', line['total'])
-            for line in bill_data['lines']
-            if line['line_type'] == 'Voice' and not line['is_removed']
+        # Total payment due from others = Bill Total - account holder's share
+        # (their voice-line total plus any Mobile Internet folded onto their row).
+        account_holder_last4 = self.config.get('account_holder_last4')
+        holder_line = next(
+            (l for l in bill_data['lines']
+             if l['line_type'] == 'Voice' and l['last4'] == account_holder_last4),
+            None,
         )
+        holder_share = Decimal('0')
+        if holder_line:
+            holder_share = (
+                holder_line.get('total_per_person', holder_line['total'])
+                + mi_extras_by_owner.get(account_holder_last4, Decimal('0'))
+            )
+        total_from_others = bill_data['total_due'] - holder_share
 
         if len(values) > 1:
             values[1].extend(['', 'Total Payment Due from Others', f"${total_from_others:.2f}"])

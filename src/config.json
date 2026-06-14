@@ -18,6 +18,7 @@
   "mobile_internet_owners": {
     "0959": "5760"
   },
+  "account_holder_last4": "5760",
   "sms": {
     "chat_db_path": "~/Library/Messages/chat.db",
     "zelle_senders": ["20736"],
