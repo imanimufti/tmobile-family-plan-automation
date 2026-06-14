@@ -122,6 +122,25 @@ def open_whatsapp(group_invite_url: Optional[str]) -> None:
         subprocess.run(['open', '-a', 'WhatsApp'], check=True)
 
 
+def send_via_applescript(open_delay: float = 4.0, after_paste_delay: float = 1.0) -> None:
+    """Drive WhatsApp Desktop to paste from clipboard and press Enter.
+
+    Requires Accessibility permission for the terminal/process running this
+    script (System Settings → Privacy & Security → Accessibility). The first
+    run will surface a permission prompt; subsequent runs are silent.
+    """
+    script = f'''
+    tell application "WhatsApp" to activate
+    delay {open_delay}
+    tell application "System Events"
+        keystroke "v" using {{command down}}
+        delay {after_paste_delay}
+        keystroke return
+    end tell
+    '''
+    subprocess.run(['osascript', '-e', script], check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Share the Google Sheet breakdown for a given month to WhatsApp')
@@ -132,6 +151,10 @@ def main():
                         help='Path to config.json')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print the rendered message + URL only; do not touch clipboard or open WhatsApp')
+    parser.add_argument('--no-send', action='store_true',
+                        help='Open WhatsApp and copy message to clipboard, but skip the auto-paste/Enter — leaves you to send manually')
+    parser.add_argument('--open-delay', type=float, default=4.0,
+                        help='Seconds to wait after launching WhatsApp before pasting (default: 4.0)')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -169,7 +192,21 @@ def main():
         print(f"✓ Opened WhatsApp into the group ({group_invite_url})")
     else:
         print("✓ Opened WhatsApp Desktop (pick the group manually)")
-    print("→ Paste with ⌘V, then press Enter")
+
+    if args.no_send:
+        print("→ Paste with ⌘V, then press Enter")
+        return
+
+    print(f"→ Auto-sending in ~{args.open_delay:.0f}s via AppleScript...")
+    try:
+        send_via_applescript(open_delay=args.open_delay)
+        print("✓ Sent to WhatsApp")
+    except subprocess.CalledProcessError as e:
+        print(f"✗ AppleScript send failed: {e}")
+        print("  Falling back to manual paste — message is on your clipboard.")
+        print("  If this is the first run, grant Accessibility permission to your terminal:")
+        print("    System Settings → Privacy & Security → Accessibility")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
