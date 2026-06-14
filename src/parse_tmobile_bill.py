@@ -79,18 +79,22 @@ class TMobileBillParser:
 
         # Parse individual lines
         # Pattern for lines like: (832) 768-4440 Voice $5.66 $9.84 - - $15.50
-        line_pattern = r'\((\d{3})\)\s*(\d{3})-(\d{4})(?:\s*-\s*Removed)?\s+(Voice|Data|Account)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2})'
+        # Also catches "Mobile Internet" rows (e.g. the mobile internet line).
+        # Longest alternative goes first so the regex engine doesn't stop at "Mobile".
+        # Trailing `- Removed` / `- New` / `- Changed` modifier on the phone row is optional
+        # and captured loosely so the regex doesn't silently drop newly-added lines.
+        line_pattern = r'\((\d{3})\)\s*(\d{3})-(\d{4})(?:\s*-\s*\w+)?\s+(Mobile\s+Internet|Voice|Data|Account)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2}|-)?\s+\$?([\d,]+\.\d{2})'
 
         for match in re.finditer(line_pattern, summary_text):
-            area_code, prefix, last4, line_type, plans, equipment, services, one_time, total = match.groups()
+            area_code, prefix, last4, line_type_raw, plans, equipment, services, one_time, total = match.groups()
 
-            # Skip if this is part of "Totals" line
             phone = f"({area_code}) {prefix}-{last4}"
+            line_type = re.sub(r'\s+', ' ', (line_type_raw or 'Voice')).strip()
 
             line_data = {
                 'phone': phone,
                 'last4': last4,
-                'line_type': line_type if line_type else 'Voice',
+                'line_type': line_type,
                 'plans': self._parse_amount(plans),
                 'equipment': self._parse_amount(equipment),
                 'services': self._parse_amount(services),
@@ -134,9 +138,12 @@ class TMobileBillParser:
     def _calculate_equal_portions(self):
         """Calculate equal portion of bill for each active voice line.
 
-        Removed/unused voice lines have their full per-line total folded into
-        the shared pool so the burden is split equally across active lines
-        instead of sitting on the unused-line row.
+        Removed voice lines have their per-line total folded into the shared
+        pool so the burden splits across active lines.
+
+        Mobile Internet lines stay on their own row at full price — their
+        contribution to plans_total is subtracted from the pool so the voice
+        lines don't subsidize them.
         """
         active_voice_lines = [
             line for line in self.bill_data['lines']
@@ -146,12 +153,18 @@ class TMobileBillParser:
             line for line in self.bill_data['lines']
             if line['line_type'] == 'Voice' and line['is_removed']
         ]
+        mobile_internet_lines = [
+            line for line in self.bill_data['lines']
+            if line['line_type'] == 'Mobile Internet'
+        ]
 
         num_active_lines = len(active_voice_lines)
         unused_burden = sum((line['total'] for line in removed_voice_lines), Decimal('0'))
+        mobile_internet_plans = sum((line['plans'] for line in mobile_internet_lines), Decimal('0'))
 
         if num_active_lines > 0:
-            equal_portion = (self.bill_data['plans_total'] + unused_burden) / num_active_lines
+            divisible_pool = self.bill_data['plans_total'] + unused_burden - mobile_internet_plans
+            equal_portion = divisible_pool / num_active_lines
 
             for line in self.bill_data['lines']:
                 if line['line_type'] == 'Voice' and not line['is_removed']:
@@ -165,6 +178,10 @@ class TMobileBillParser:
                     # Cost is redistributed; zero out the row so it doesn't double-bill.
                     line['equal_portion'] = Decimal('0')
                     line['total_per_person'] = Decimal('0')
+                elif line['line_type'] == 'Mobile Internet':
+                    # Charged in full to the mapped person; not split.
+                    line['equal_portion'] = Decimal('0')
+                    line['total_per_person'] = line['total']
                 else:
                     line['equal_portion'] = Decimal('0')
                     line['total_per_person'] = line['total']

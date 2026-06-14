@@ -15,6 +15,9 @@
     "0959": "Imani Internet",
     "8507": "Waleed"
   },
+  "mobile_internet_owners": {
+    "0959": "5760"
+  },
   "sms": {
     "chat_db_path": "~/Library/Messages/chat.db",
     "zelle_senders": ["20736"],

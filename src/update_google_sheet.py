@@ -203,23 +203,47 @@ class GoogleSheetsUpdater:
             ['Name', 'Account', 'Equal portion of bill', 'Recurring Extras', 'Extras', 'Credit', 'Total per person', 'Payment Status', 'Notes']
         ]
 
+        # Build per-owner Mobile Internet add-ons. Any Mobile Internet line whose
+        # last4 has an owner mapping is folded into that owner's recurring extras
+        # instead of getting its own row.
+        from decimal import Decimal
+        mi_owners = self.config.get('mobile_internet_owners', {})
+        mi_extras_by_owner: Dict[str, Decimal] = {}
+        for line in bill_data['lines']:
+            if line['line_type'] != 'Mobile Internet':
+                continue
+            owner_last4 = mi_owners.get(line['last4'])
+            if not owner_last4:
+                continue
+            mi_extras_by_owner[owner_last4] = (
+                mi_extras_by_owner.get(owner_last4, Decimal('0')) + line['total']
+            )
+
         # Data rows - map phone numbers to names
         for line in bill_data['lines']:
-            # Skip Account line
             if line['line_type'] == 'Account':
+                continue
+            # Skip Mobile Internet lines whose cost is folded into an owner row
+            if line['line_type'] == 'Mobile Internet' and mi_owners.get(line['last4']):
                 continue
 
             last4 = line['last4']
             name = self.phone_mapping.get(last4, f"Unknown ({last4})")
 
+            mi_extra = mi_extras_by_owner.get(last4, Decimal('0'))
+            equipment_amount = line['equipment'] + mi_extra
+            total_amount = line.get('total_per_person', line['total']) + mi_extra
+
             equal_portion = f"${line.get('equal_portion', 0):.2f}"
-            equipment = f"${line['equipment']:.2f}" if line['equipment'] > 0 else ""
+            equipment = f"${equipment_amount:.2f}" if equipment_amount > 0 else ""
             one_time = f"${line['one_time_charges']:.2f}" if line['one_time_charges'] > 0 else ""
             credit = "$0.00"
-            total = f"${line.get('total_per_person', line['total']):.2f}"
+            total = f"${total_amount:.2f}"
             payment_status = "Pending"  # Default to Pending, will be updated by Gmail monitor
             if line['is_removed']:
                 notes = f"Removed — ${line['total']:.2f} split equally across active lines"
+            elif mi_extra > 0:
+                notes = f"Includes ${mi_extra:.2f} Mobile Internet"
             else:
                 notes = ""
 
