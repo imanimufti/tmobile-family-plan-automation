@@ -147,7 +147,7 @@ class SmsSource(PaymentSource):
 
         try:
             con = sqlite3.connect(f"file:{self.chat_db_path}?mode=ro", uri=True)
-        except sqlite3.OperationalError as err:
+        except sqlite3.Error as err:
             print(f"[sms] Cannot open chat.db (Full Disk Access required?): {err}")
             return []
 
@@ -166,6 +166,10 @@ class SmsSource(PaymentSource):
                 (cutoff_apple_ns,),
             )
             rows = cur.fetchall()
+        except sqlite3.Error as err:
+            # FDA is sometimes denied at query time, not connect time.
+            print(f"[sms] chat.db query failed (Full Disk Access required?): {err}")
+            return []
         finally:
             con.close()
 
