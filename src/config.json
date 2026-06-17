@@ -19,6 +19,31 @@
     "0959": "5760"
   },
   "account_holder_last4": "5760",
+  "pays_for": {
+    "Qasim": ["Tuba"]
+  },
+  "payment_match_months": 3,
+  "tmobile": {
+    "keychain_service": "tmobile-login",
+    "login_url": "https://account.t-mobile.com/signin/v2/",
+    "billing_url": "https://www.t-mobile.com/bill/summary",
+    "download_dir": "/Users/imanimufti/Projects/tmobile-family-plan-automation/bills",
+    "otp_sender_pattern": "T-?Mobile|magenta|^45|^46|^90",
+    "otp_max_wait_seconds": 150,
+    "selectors": {
+      "username": "#emailOrPhoneNumberTextBox",
+      "username_next": "#lp1-next-btn",
+      "use_password_link": "#lp2-routeTologin-link",
+      "passkey_button_avoid": "#lp2-login-btn",
+      "password": "#passwordTextBox, input[type='password'], input[autocomplete='current-password']",
+      "password_submit": "button[type='submit']",
+      "otp_input": "input[autocomplete='one-time-code'], input[name='otp'], #otpTextBox",
+      "otp_submit": "button[type='submit']",
+      "logged_in_marker": "a[href*='/bill'], [aria-label='View bill']",
+      "bill_pdf_link": "[role='button'][aria-label='Download my bill (PDF)'], [aria-label*='Download my bill']",
+      "bill_summary_button": "text=Download summary bill"
+    }
+  },
   "sms": {
     "chat_db_path": "~/Library/Messages/chat.db",
     "zelle_senders": ["20736"],
@@ -27,6 +52,9 @@
   },
   "whatsapp": {
     "group_invite_url": "https://chat.whatsapp.com/FGeH7yvJN1z4GAPghjCQUz",
+    "group_name": "T-mobile",
+    "group_id": "13476337696-1539399147@g.us",
+    "send_mode": "web",
     "payment_methods": {
       "Venmo": "@imani-mufti",
       "Zelle / Apple Pay": "2134255760"

@@ -1,0 +1,12 @@
+{
+  "name": "tmobile-whatsapp-sender",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless WhatsApp Web sender for the T-Mobile bill pipeline (works while the Mac is locked).",
+  "type": "commonjs",
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}

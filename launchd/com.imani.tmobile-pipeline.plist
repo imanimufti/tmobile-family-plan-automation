@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template — do not edit the copy in ~/Library/LaunchAgents directly.
+  scripts/install_launchd.sh substitutes __PYTHON__ and __ROOT__ and installs it.
+  Runs the unattended pipeline at 08:00, 13:00 and 19:00 local time. If the Mac
+  is asleep at a slot, launchd runs the missed job on the next wake.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.imani.tmobile-pipeline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__ROOT__/src/run_pipeline.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/logs/pipeline.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/logs/pipeline.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

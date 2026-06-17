@@ -365,6 +365,45 @@ def send_image_with_caption_via_applescript(
     _post_cmd_key(_KEY_RETURN)
 
 
+def send_via_whatsapp_web(group_name: str, group_id: str,
+                          image_path: Optional[str], message: str) -> None:
+    """Send the breakdown via headless WhatsApp Web (Node helper). Works while
+    the Mac is locked, unlike the WhatsApp Desktop keystroke path. Prefers the
+    stable group_id over the name. Raises on failure so the caller can retry."""
+    script = Path(__file__).resolve().parent.parent / "whatsapp" / "send.js"
+    if not script.exists():
+        raise RuntimeError(f"WhatsApp Web sender not found at {script} (run npm install in whatsapp/)")
+    if not group_id and not group_name:
+        raise RuntimeError(
+            "whatsapp.group_id/group_name is not set in config.json. Discover it with:\n"
+            "  node whatsapp/send.js list-groups")
+
+    # Resolve node robustly — under launchd the PATH is minimal and won't
+    # include Homebrew's bin.
+    import shutil
+    node = shutil.which("node") or next(
+        (p for p in ("/opt/homebrew/bin/node", "/usr/local/bin/node") if Path(p).exists()),
+        None)
+    if not node:
+        raise RuntimeError("node not found (install Node.js or add it to PATH)")
+
+    msg_file = Path(tempfile.gettempdir()) / "tmobile-wa-message.txt"
+    msg_file.write_text(message, encoding="utf-8")
+    target = ["--group-id", group_id] if group_id else ["--group", group_name]
+    cmd = [node, str(script), "send", *target, "--message-file", str(msg_file)]
+    if image_path:
+        cmd += ["--image", image_path]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        sys.stdout.write(result.stdout)
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+        if result.returncode != 0:
+            raise RuntimeError(f"WhatsApp Web send failed (exit {result.returncode})")
+    finally:
+        msg_file.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Share the Google Sheet breakdown for a given month to WhatsApp')
@@ -377,6 +416,14 @@ def main():
                         help='Print the rendered message + URL only; do not touch clipboard or open WhatsApp')
     parser.add_argument('--no-send', action='store_true',
                         help='Open WhatsApp and copy each artifact to clipboard, but skip the auto-paste/Enter')
+    parser.add_argument('--send-mode', choices=['desktop', 'web'], default=None,
+                        help='desktop = drive WhatsApp Desktop (needs the screen unlocked); '
+                             'web = headless WhatsApp Web via Node (works while locked). '
+                             'Defaults to whatsapp.send_mode in config.')
+    parser.add_argument('--group-id', default=None,
+                        help='Override the WhatsApp group id (web mode); else config')
+    parser.add_argument('--group', dest='group_override', default=None,
+                        help='Override the WhatsApp group name (web mode); else config')
     parser.add_argument('--no-screenshot', action='store_true',
                         help='Skip the PNG breakdown image — send the text link message only')
     parser.add_argument('--render-only', action='store_true',
@@ -440,6 +487,14 @@ def main():
 
     if args.dry_run:
         print("\n[dry-run] Clipboard not touched, WhatsApp not opened.")
+        return
+
+    send_mode = args.send_mode or wa.get('send_mode') or 'desktop'
+    if send_mode == 'web':
+        gid = args.group_id or wa.get('group_id', '')
+        gname = args.group_override or wa.get('group_name', '')
+        send_via_whatsapp_web(gname, gid, png_path, message)
+        print("✓ Sent via WhatsApp Web")
         return
 
     open_whatsapp(group_invite_url)

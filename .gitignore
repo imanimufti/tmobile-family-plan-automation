@@ -20,6 +20,16 @@ token.json
 # Personal data
 bills/*.pdf
 
+# Automation runtime (local state, logs, browser profile)
+state/
+logs/
+tmobile_profile/
+
+# Node (WhatsApp Web sender)
+node_modules/
+.wwebjs_cache/
+.wwebjs_auth/
+
 # IDE
 .vscode/
 .idea/

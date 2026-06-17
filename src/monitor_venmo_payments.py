@@ -156,7 +156,7 @@ class SmsSource(PaymentSource):
             cur.execute(
                 """
                 SELECT m.ROWID, h.id, m.is_from_me, m.text, m.balloon_bundle_id,
-                       m.payload_data, m.date
+                       m.payload_data, m.date, m.attributedBody
                 FROM message m
                 LEFT JOIN handle h ON m.handle_id = h.rowid
                 WHERE m.date > ?
@@ -174,8 +174,12 @@ class SmsSource(PaymentSource):
             con.close()
 
         payments: List[Dict] = []
-        for rowid, sender, _from_me, text, bundle, payload, date_ns in rows:
+        for rowid, sender, _from_me, text, bundle, payload, date_ns, attributed in rows:
             ts = self._apple_ns_to_iso(date_ns)
+            # Many SMS (incl. bank/Zelle alerts) store their body in
+            # attributedBody with a NULL text column — recover it.
+            if not text:
+                text = self._decode_attributed_body(attributed)
             parsed = None
 
             if bundle and 'PeerPayment' in bundle:
@@ -197,6 +201,31 @@ class SmsSource(PaymentSource):
         else:
             print("[sms] No SMS payments matched")
         return payments
+
+    @staticmethod
+    def _decode_attributed_body(blob) -> str:
+        """Recover readable text from a Messages `attributedBody` streamtyped
+        archive (used when the `text` column is NULL). We don't fully parse the
+        NSArchiver format — we extract the printable payload after the trailing
+        `NSString` class marker and trim the archive's attribute metadata. The
+        downstream regex parsers are anchored well enough to tolerate a stray
+        leading length byte."""
+        if not blob:
+            return ''
+        try:
+            raw = bytes(blob)
+        except Exception:
+            return ''
+        s = re.sub(r'[^\x20-\x7e]+', ' ', raw.decode('utf-8', 'ignore'))
+        idx = s.rfind('NSString')
+        if idx != -1:
+            s = s[idx + len('NSString'):]
+        # Cut the archive's trailing attribute scaffolding.
+        for marker in ('__kIM', 'NSDictionary', 'NSNumber', 'NSValue'):
+            j = s.find(marker)
+            if j != -1:
+                s = s[:j]
+        return s.lstrip(' +').strip()
 
     @staticmethod
     def _apple_ns_to_iso(date_ns: Optional[int]) -> str:
@@ -329,6 +358,12 @@ class PaymentMonitor:
         self.phone_mapping = self.config.get('phone_to_name_mapping', {})
         self.sms_config = self.config.get('sms', {})
         self.sms_payer_aliases = self.sms_config.get('sms_payer_aliases', {})
+        # Couple/dependent relationships: when the key pays, the listed people
+        # are covered by the same payment (e.g. {"Qasim": ["Tuba"]}).
+        self.pays_for = self.config.get('pays_for', {})
+        # How many monthly tabs back (including the anchor month) to consider
+        # when matching a lump-sum payment that spans multiple months.
+        self.match_months = int(self.config.get('payment_match_months', 3))
 
         self.gmail_service = None
         self.sheets_service = None
@@ -395,19 +430,15 @@ class PaymentMonitor:
 
     # -- Sheet I/O ------------------------------------------------------
 
-    def detect_current_tab(self) -> Optional[str]:
-        """Pick the most recent monthly tab (e.g. 'May 26') from the sheet —
-        the one whose <Mon> <YY> is <= today. Falls back to the closest
-        prior month if the current month hasn't been processed yet.
-        Returns None if no monthly tabs exist.
-        """
+    def _list_monthly_tabs(self) -> List[tuple]:
+        """Return [(date, name)] for every 'Mon YY' tab in the sheet (unsorted)."""
         try:
             meta = self.sheets_service.spreadsheets().get(
                 spreadsheetId=self.sheet_id
             ).execute()
         except HttpError as err:
-            print(f"Cannot list tabs to auto-detect: {err}")
-            return None
+            print(f"Cannot list tabs: {err}")
+            return []
 
         month_pat = re.compile(r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2})$')
         monthly_tabs = []
@@ -420,7 +451,15 @@ class PaymentMonitor:
             mon_num = datetime.strptime(mon_str, '%b').month
             yr_num = 2000 + int(yr_str)
             monthly_tabs.append((datetime(yr_num, mon_num, 1), name))
+        return monthly_tabs
 
+    def detect_current_tab(self) -> Optional[str]:
+        """Pick the most recent monthly tab (e.g. 'May 26') from the sheet —
+        the one whose <Mon> <YY> is <= today. Falls back to the closest
+        prior month if the current month hasn't been processed yet.
+        Returns None if no monthly tabs exist.
+        """
+        monthly_tabs = self._list_monthly_tabs()
         if not monthly_tabs:
             return None
 
@@ -429,6 +468,33 @@ class PaymentMonitor:
         pool = not_future if not_future else monthly_tabs
         pool.sort(reverse=True)
         return pool[0][1]
+
+    def recent_tabs_for(self, anchor_tab: str, n: int) -> List[str]:
+        """Return the anchor tab plus up to n-1 prior monthly tabs, newest first.
+
+        Used so a lump-sum payment can be matched against several months of
+        outstanding charges, not just the current month.
+        """
+        monthly_tabs = self._list_monthly_tabs()
+        anchor_date = next((d for d, name in monthly_tabs if name == anchor_tab), None)
+        if anchor_date is None:
+            return [anchor_tab]
+        eligible = sorted(
+            [(d, name) for d, name in monthly_tabs if d <= anchor_date],
+            reverse=True,
+        )
+        return [name for _, name in eligible[:max(1, n)]]
+
+    def get_charges(self, tab_names: List[str]) -> List[Dict]:
+        """Flatten every person-row across the given tabs into one charge list,
+        each charge tagged with its tab_name. Newest tab first (matches the
+        order of tab_names, which recent_tabs_for returns newest-first)."""
+        charges: List[Dict] = []
+        for tab in tab_names:
+            for person in self.get_sheet_data(tab):
+                person['tab_name'] = tab
+                charges.append(person)
+        return charges
 
     def get_sheet_data(self, tab_name: str) -> List[Dict]:
         try:
@@ -497,23 +563,89 @@ class PaymentMonitor:
             return self.phone_mapping[last4]
         return None
 
-    def match_payment_to_person(self, payment: Dict, sheet_data: List[Dict]) -> Optional[Dict]:
-        amount = payment['amount']
+    def _find_payer_name(self, sender_label: str, names: List[str]) -> Optional[str]:
+        """Identify which billed person sent the payment by substring-matching
+        the sheet name against the sender label. Prefer the longest (most
+        specific) match so 'Imani Internet' wins over 'Imani' when relevant."""
+        sl = sender_label.lower()
+        matches = [n for n in names if n and n.lower() in sl]
+        if not matches:
+            return None
+        return max(matches, key=len)
+
+    def _payer_group(self, payer: str) -> List[str]:
+        """The payer plus anyone they cover (e.g. Qasim also covers Tuba)."""
+        group = [payer]
+        for dependent in self.pays_for.get(payer, []):
+            if dependent not in group:
+                group.append(dependent)
+        return group
+
+    @staticmethod
+    def _best_subset(charges: List[Dict], amount: float,
+                     payer: str, tol: float = 0.01) -> Optional[List[Dict]]:
+        """Find the subset of `charges` whose totals sum to `amount`.
+
+        People often pay several months (and, for couples, several people) in a
+        single lump sum, so we search combinations rather than single rows.
+        `charges` is assumed newest-first. Among subsets that sum correctly we
+        prefer: more charges cleared, then ones including the payer's own
+        charge, then the most-recent months.
+        """
+        n = len(charges)
+        if n == 0:
+            return None
+        if n > 18:  # guard against pathological 2^n blow-up
+            charges = charges[:18]
+            n = 18
+
+        best_idxs = None
+        best_key = None
+        for mask in range(1, 1 << n):
+            total = 0.0
+            for i in range(n):
+                if mask & (1 << i):
+                    total += charges[i]['total']
+            if abs(total - amount) >= tol:
+                continue
+            idxs = [i for i in range(n) if mask & (1 << i)]
+            has_own = any(charges[i]['name'] == payer for i in idxs)
+            # Lower indices are more recent; -sum(idxs) favours recent months.
+            key = (len(idxs), has_own, -sum(idxs))
+            if best_key is None or key > best_key:
+                best_key = key
+                best_idxs = idxs
+
+        if best_idxs is None:
+            return None
+        return [charges[i] for i in best_idxs]
+
+    def match_payment(self, payment: Dict, charges: List[Dict]) -> Optional[List[Dict]]:
+        """Resolve the payer, gather their group's outstanding charges across the
+        recent tabs, and return the subset of charges this payment settles."""
         sender_label = self._resolve_sender_label(payment)
         if not sender_label:
             return None
 
-        sender_lower = sender_label.lower()
-        for person in sheet_data:
-            if person['payment_status'].lower() == 'paid':
-                continue
-            if abs(person['total'] - amount) >= 0.01:
-                continue
-            if person['name'].lower() in sender_lower:
-                print(f"  ✓ Match: {person['name']} (${amount:.2f}) via {payment['source']}")
-                print(f"    From: {sender_label}")
-                return person
-        return None
+        names = list({c['name'] for c in charges})
+        payer = self._find_payer_name(sender_label, names)
+        if not payer:
+            return None
+
+        group = self._payer_group(payer)
+        pending = [
+            c for c in charges
+            if c['name'] in group and c['payment_status'].lower() != 'paid'
+        ]
+        subset = self._best_subset(pending, payment['amount'], payer)
+        if not subset:
+            return None
+
+        covered = ", ".join(f"{c['name']} {c['tab_name']} (${c['total']:.2f})" for c in subset)
+        print(f"  ✓ Match: ${payment['amount']:.2f} from {payer} via {payment['source']}")
+        print(f"    From: {sender_label}")
+        print(f"    Covers: {covered}")
+        return subset
 
     # -- Top level ------------------------------------------------------
 
@@ -536,26 +668,29 @@ class PaymentMonitor:
                 print(f"  [{p['source']:11}] ${p['amount']:>8.2f}  {label}  ({p['date']})")
             return
 
-        print(f"\nReading Google Sheet tab '{tab_name}'...")
-        sheet_data = self.get_sheet_data(tab_name)
-        if not sheet_data:
+        tab_names = self.recent_tabs_for(tab_name, self.match_months)
+        print(f"\nReading recent tab(s): {', '.join(tab_names)}...")
+        charges = self.get_charges(tab_names)
+        if not charges:
             print("No pending payments in sheet")
             return
 
-        print(f"\nMatching {len(payments)} payment(s) against {len(sheet_data)} person(s)...")
+        print(f"\nMatching {len(payments)} payment(s) against "
+              f"{len(charges)} charge(s) across {len(tab_names)} month(s)...")
         matched = 0
         for p in payments:
             label = self._resolve_sender_label(p) or '(unresolved)'
             print(f"\nProcessing [{p['source']}]: ${p['amount']:.2f} from {label}")
-            person = self.match_payment_to_person(p, sheet_data)
-            if person:
-                if self.update_payment_status(tab_name, person['row_index']):
-                    matched += 1
-                    person['payment_status'] = 'Paid'
+            subset = self.match_payment(p, charges)
+            if subset:
+                for charge in subset:
+                    if self.update_payment_status(charge['tab_name'], charge['row_index']):
+                        charge['payment_status'] = 'Paid'
+                        matched += 1
             else:
-                print("  ✗ No match (amount or name mismatch)")
+                print("  ✗ No match (unknown payer or amount mismatch)")
 
-        print(f"\n{'='*60}\nSummary: Updated {matched} payment(s)\n{'='*60}")
+        print(f"\n{'='*60}\nSummary: Updated {matched} charge(s)\n{'='*60}")
 
 
 # ---------------------------------------------------------------------------

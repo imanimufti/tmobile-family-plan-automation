@@ -27,7 +27,9 @@ Automates T-Mobile family plan billing — parses monthly bills, calculates per-
 1. **PDF Bill Parsing** - Extracts per-line costs from T-Mobile PDF bills
 2. **Google Sheets Integration** - Automatically updates your billing spreadsheet with a new tab for each month
 3. **Payment Tracking** - Monitors Gmail for Venmo payment notifications and marks people as paid
-4. **Smart Matching** - Matches payments using both amount and name (fuzzy matching on Venmo handles)
+4. **Smart Matching** - Matches payments using both amount and name (fuzzy matching on Venmo handles). Handles two real-world cases:
+   - **Lump-sum / multi-month payments** - A single payment can settle several months at once. The matcher looks across the last few monthly tabs (`payment_match_months` in `config.json`, default 3) and finds the combination of outstanding charges that adds up to the amount paid.
+   - **Couples / pays-for relationships** - When one person covers another, configure it under `pays_for` in `config.json` (e.g. `{"Qasim": ["Tuba"]}`). A payment from Qasim is matched against Qasim's *and* Tuba's outstanding charges, and clears both.
 
 ## Project Structure
 
@@ -39,10 +41,81 @@ tmobile-family-plan-automation/
 │   ├── config.json                 # Configuration (Google Sheet ID, phone mappings)
 │   ├── parse_tmobile_bill.py       # PDF parser
 │   ├── update_google_sheet.py      # Google Sheets updater
-│   └── monitor_venmo_payments.py   # Gmail/Venmo payment monitor
+│   ├── monitor_venmo_payments.py   # Gmail/Venmo/Zelle/Apple Cash payment monitor
+│   ├── share_to_whatsapp.py        # Posts the breakdown to the WhatsApp group
+│   ├── fetch_tmobile_bill.py       # Best-effort bill download (Playwright + Keychain)
+│   └── run_pipeline.py             # Unattended orchestrator (run by launchd)
+├── launchd/                        # launchd agent template
+├── scripts/                        # install/uninstall the launchd agent
 ├── credentials.json                # Google API credentials (you need to create this)
 └── README.md
 ```
+
+## Unattended automation
+
+`src/run_pipeline.py` runs the whole monthly cycle hands-off. A macOS `launchd`
+agent fires it ~3×/day (08:00 / 13:00 / 19:00); each run does one idempotent pass:
+
+1. **Acquire** – if this month's `bills/SummaryBill<Mon><YYYY>.pdf` is missing, it
+   tries to download it from T-Mobile (≤ once/day).
+2. **Process** – parses the PDF and builds the month's Sheet tab (exactly once;
+   it never overwrites an existing tab, so recorded payments are safe).
+3. **Announce** – posts the breakdown (image + caption) to the family WhatsApp
+   group via a **headless WhatsApp Web session** (`whatsapp/send.js`), so it
+   works even while the Mac is locked. Requires a one-time QR seed (below).
+4. **Monitor** – matches incoming Venmo/Zelle/Apple Cash payments and marks
+   people Paid. Runs every pass, even while the screen is locked.
+
+Per-month progress lives in `state/pipeline_state.json`, so re-runs are safe.
+If the T-Mobile fetch fails, you get a macOS notification and just drop the PDF
+in `bills/` — the next run continues automatically. Preview a run without
+changing anything: `python3 src/run_pipeline.py --dry-run`.
+
+### One-time setup
+
+The fragile/secure bits can't be scripted with your secrets — do these once:
+
+```bash
+# 1. T-Mobile credentials into the Keychain (two items, one service)
+security add-generic-password -s tmobile-login -a username -w '<T-Mobile username>'
+security add-generic-password -s tmobile-login -a password -w '<T-Mobile password>'
+
+# 2. Playwright browser for the bill download
+pip install playwright && python3 -m playwright install chromium
+
+# 3. Seed a logged-in browser profile (do the login/2FA in the window once;
+#    cookies persist so later headless runs usually skip 2FA)
+python3 src/fetch_tmobile_bill.py --headed --dry-run
+
+# 4. Seed the WhatsApp Web session (one-time QR scan) for unattended posting
+cd whatsapp && npm install && node send.js seed   # scan the QR in WhatsApp → Linked Devices
+node send.js list-groups                           # copy the family group's exact name
+#  -> put that name in config.json under whatsapp.group_name
+
+# 5. Install the scheduler
+./scripts/install_launchd.sh        # prints the interpreter path to grant below
+```
+
+Then grant the **interpreter path the installer prints** two permissions in
+**System Settings → Privacy & Security**:
+- **Full Disk Access** – so it can read `~/Library/Messages/chat.db` (Zelle /
+  Apple Cash payments and the 2FA code).
+- **Accessibility** – so it can drive WhatsApp Desktop to send the breakdown.
+
+Run it immediately and watch the log:
+```bash
+launchctl kickstart -k gui/$(id -u)/com.imani.tmobile-pipeline
+tail -f logs/pipeline.log
+```
+
+Optional (since the Mac sleeps), wake it for the morning run early each month:
+```bash
+sudo pmset repeat wakeorpoweron MTWRFSU 07:55:00
+```
+
+To stop the automation: `./scripts/uninstall_launchd.sh`. The selectors/URLs the
+T-Mobile fetcher uses live in `config.json` under `tmobile` so they can be
+re-tuned without code changes if the site moves things around.
 
 ## Getting Started Tomorrow
 
