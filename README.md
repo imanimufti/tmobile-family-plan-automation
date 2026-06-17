@@ -56,8 +56,10 @@ tmobile-family-plan-automation/
 `src/run_pipeline.py` runs the whole monthly cycle hands-off. A macOS `launchd`
 agent fires it ~3×/day (08:00 / 13:00 / 19:00); each run does one idempotent pass:
 
-1. **Acquire** – if this month's `bills/SummaryBill<Mon><YYYY>.pdf` is missing, it
-   tries to download it from T-Mobile (≤ once/day).
+1. **Acquire** – T-Mobile issues the bill on the 19th, so from the **20th**
+   onward (config `tmobile.fetch_day`), if this month's
+   `bills/SummaryBill<Mon><YYYY>.pdf` is missing, it downloads it (≤ once/day
+   until it has it). Before the 20th it skips fetching; the other stages still run.
 2. **Process** – parses the PDF and builds the month's Sheet tab (exactly once;
    it never overwrites an existing tab, so recorded payments are safe).
 3. **Announce** – posts the breakdown (image + caption) to the family WhatsApp

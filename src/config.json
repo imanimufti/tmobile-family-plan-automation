@@ -45,6 +45,7 @@
   },
   "tmobile": {
     "keychain_service": "tmobile-login",
+    "fetch_day": 20,
     "login_url": "https://account.t-mobile.com/signin/v2/",
     "billing_url": "https://www.t-mobile.com/bill/summary",
     "download_dir": "/Users/imanimufti/Projects/tmobile-family-plan-automation/bills",

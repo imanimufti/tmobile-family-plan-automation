@@ -114,16 +114,26 @@ def stage_acquire(state: Dict, tab: str, dry_run: bool) -> Optional[Path]:
         print(f"[acquire] PDF present: {pdf.name}")
         return pdf
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    fetch_meta = state.setdefault("_fetch", {})
-    if fetch_meta.get("last_attempt") == today:
-        print("[acquire] PDF missing; already attempted a fetch today — skipping")
-        return None
-
     import fetch_tmobile_bill
     with open("src/config.json") as f:
         cfg = json.load(f)
     svc = cfg.get("tmobile", {}).get("keychain_service", "tmobile-login")
+
+    # T-Mobile issues the bill on the 19th; only try to fetch from the 20th
+    # onward (then daily until we have it). Earlier in the month there's nothing
+    # new to fetch — the monitor/remind stages still run on every pass.
+    fetch_day = int(cfg.get("tmobile", {}).get("fetch_day", 20))
+    now = datetime.now()
+    if now.day < fetch_day:
+        print(f"[acquire] PDF missing; before fetch day (the {fetch_day}th) — "
+              f"will fetch from the {fetch_day}th. Skipping.")
+        return None
+
+    today = now.strftime("%Y-%m-%d")
+    fetch_meta = state.setdefault("_fetch", {})
+    if fetch_meta.get("last_attempt") == today:
+        print("[acquire] PDF missing; already attempted a fetch today — skipping")
+        return None
 
     # Don't attempt (or nag) until the password is configured in the Keychain —
     # that's a one-time manual setup step, not a failure worth a notification.
