@@ -65,6 +65,12 @@ agent fires it ~3×/day (08:00 / 13:00 / 19:00); each run does one idempotent pa
    works even while the Mac is locked. Requires a one-time QR seed (below).
 4. **Monitor** – matches incoming Venmo/Zelle/Apple Cash payments and marks
    people Paid. Runs every pass, even while the screen is locked.
+5. **Remind** – DMs anyone still unpaid past the threshold (default: first at 7
+   days, then every 5 days until Paid), via WhatsApp Web. Respects the couples
+   rule (a dependent's reminder rolls into the responsible payer's DM). Numbers
+   live in `config.json` under `reminders.whatsapp_numbers`; toggle with
+   `reminders.enabled`. Last-reminded timestamps are tracked in state so nobody
+   is spammed each run.
 
 Per-month progress lives in `state/pipeline_state.json`, so re-runs are safe.
 If the T-Mobile fetch fails, you get a macOS notification and just drop the PDF

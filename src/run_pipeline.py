@@ -20,6 +20,7 @@ Run `python3 src/run_pipeline.py --dry-run` to see what each stage would do.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -221,6 +222,7 @@ def stage_announce(state: Dict, tab: str, dry_run: bool) -> None:
     sys.stdout.write(result.stdout)
     if result.returncode == 0:
         ms["announced"] = True
+        ms["announced_at"] = datetime.now().isoformat()  # anchors the reminder clock
         save_state(state)
         print("[announce] Sent")
     else:
@@ -229,8 +231,9 @@ def stage_announce(state: Dict, tab: str, dry_run: bool) -> None:
         notify("T-Mobile bill", f"WhatsApp send for {tab} failed; will retry.")
 
 
-def stage_monitor(tab: str, days_back: int, dry_run: bool) -> None:
-    """Run a single payment-matching pass. Unaffected by lock state."""
+def stage_monitor(tab: str, days_back: int, dry_run: bool):
+    """Run a single payment-matching pass. Unaffected by lock state.
+    Returns (monitor, target_tab) so the reminder stage can reuse the session."""
     from monitor_venmo_payments import PaymentMonitor
     monitor = PaymentMonitor()
     monitor.authenticate("credentials.json")
@@ -238,6 +241,127 @@ def stage_monitor(tab: str, days_back: int, dry_run: bool) -> None:
     print(f"[monitor] Pass over '{target}' (recent {monitor.match_months} month(s))")
     monitor.process_payments(target, days_back=days_back,
                              source_selection="all", dry_run=dry_run)
+    return monitor, target
+
+
+def _tab_pdf_issue_date(tab: str) -> Optional[datetime]:
+    """Parse the 'Bill issue date' from the tab's bill PDF, as a fallback
+    reference for the reminder clock when announced_at isn't recorded."""
+    m = re.match(r'([A-Za-z]{3})\s+(\d{2})$', tab)
+    if not m:
+        return None
+    pdf = ROOT / "bills" / f"SummaryBill{m.group(1).capitalize()}20{m.group(2)}.pdf"
+    if not pdf.exists():
+        return None
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf))
+        text = doc[0].get_text()
+        doc.close()
+        d = re.search(r'Bill issue date\s+([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})', text)
+        if d:
+            return datetime.strptime(f"{d.group(1)[:3]} {d.group(2)} {d.group(3)}", "%b %d %Y")
+    except Exception:
+        return None
+    return None
+
+
+def stage_remind(monitor, state: Dict, tab: str, dry_run: bool) -> None:
+    """DM each person still unpaid past the reminder thresholds. Respects the
+    couples rule: a dependent's (e.g. Tuba's) reminder is rolled into the
+    responsible payer's (Qasim's) DM, since the payer covers them."""
+    with open("src/config.json") as f:
+        cfg = json.load(f)
+    rcfg = cfg.get("reminders", {})
+    if not rcfg.get("enabled"):
+        print("[remind] Reminders disabled in config — skipping")
+        return
+
+    numbers = rcfg.get("whatsapp_numbers", {})
+    first_after = int(rcfg.get("first_after_days", 7))
+    repeat_every = int(rcfg.get("repeat_every_days", 5))
+
+    ms = month_state(state, tab)
+    ref_iso = ms.get("announced_at")
+    ref = datetime.fromisoformat(ref_iso) if ref_iso else _tab_pdf_issue_date(tab)
+    if not ref:
+        print("[remind] No reference date (announce/issue) for this bill — skipping")
+        return
+    days = (datetime.now() - ref).days
+    if days < first_after:
+        print(f"[remind] Bill is {days} day(s) old (< {first_after}) — no reminders yet")
+        return
+
+    # Roll each pending charge up to the person responsible for paying it.
+    responsible = {dep: payer for payer, deps in cfg.get("pays_for", {}).items() for dep in deps}
+    skip_names = {"Imani", "Imani Internet", "Unused Line"}
+    owed: Dict[str, float] = {}
+    for p in monitor.get_sheet_data(tab):
+        if p["payment_status"].lower() == "paid" or p["total"] <= 0 or p["name"] in skip_names:
+            continue
+        payer = responsible.get(p["name"], p["name"])
+        owed[payer] = owed.get(payer, 0.0) + p["total"]
+
+    if not owed:
+        print("[remind] Everyone has paid — no reminders due")
+        return
+
+    # Build payment-method lines for the DM body.
+    methods = cfg.get("whatsapp", {}).get("payment_methods", {})
+    methods_str = "\n".join(f"• {k}: {v}" for k, v in methods.items())
+    template = rcfg.get("dm_template", "Reminder: your T-Mobile share for {tab} is ${amount}.")
+
+    rstate = ms.setdefault("reminders", {})
+    now = datetime.now()
+    batch = []
+    for payer, amount in sorted(owed.items()):
+        num = numbers.get(payer)
+        if not num:
+            print(f"[remind] No WhatsApp number for {payer} — skipping")
+            continue
+        last_iso = rstate.get(payer)
+        if last_iso:
+            if (now - datetime.fromisoformat(last_iso)).days < repeat_every:
+                continue  # reminded recently
+        msg = template.format(name=payer, tab=tab, amount=f"{amount:.2f}", methods=methods_str)
+        batch.append({"to": num, "message": msg, "payer": payer})
+
+    if not batch:
+        print("[remind] No reminders due this run (all reminded recently)")
+        return
+
+    if dry_run:
+        print(f"[remind] WOULD DM {len(batch)} person(s) for '{tab}' ({days} days old):")
+        for b in batch:
+            print(f"    → {b['payer']} ({b['to']})")
+        return
+
+    payload = [{"to": b["to"], "message": b["message"]} for b in batch]
+    batch_file = ROOT / "state" / "reminder_batch.json"
+    batch_file.write_text(json.dumps(payload))
+    node = _node_bin()
+    print(f"[remind] DMing {len(batch)} person(s) for '{tab}'...")
+    result = subprocess.run(
+        [node, str(ROOT / "whatsapp" / "send.js"), "send-batch", "--file", str(batch_file)],
+        capture_output=True, text=True,
+    )
+    sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stdout.write(result.stderr)
+    # Record reminders for the numbers confirmed sent.
+    sent_nums = set(re.findall(r'DM sent to (\d+)', result.stdout))
+    for b in batch:
+        if re.sub(r"\D", "", b["to"]) in sent_nums:
+            rstate[b["payer"]] = now.isoformat()
+    save_state(state)
+    batch_file.unlink(missing_ok=True)
+
+
+def _node_bin() -> str:
+    import shutil
+    return shutil.which("node") or next(
+        (p for p in ("/opt/homebrew/bin/node", "/usr/local/bin/node") if Path(p).exists()),
+        "node")
 
 
 def main():
@@ -277,11 +401,13 @@ def main():
         import traceback
         traceback.print_exc()
 
-    # Monitor always runs, even if earlier stages failed.
+    # Monitor always runs, even if earlier stages failed; reminders follow it
+    # (so freshly-cleared payments aren't reminded).
     try:
-        stage_monitor(tab, args.days, args.dry_run)
+        monitor, target = stage_monitor(tab, args.days, args.dry_run)
+        stage_remind(monitor, state, target, args.dry_run)
     except Exception as e:
-        print(f"[monitor] Errored: {e}")
+        print(f"[monitor/remind] Errored: {e}")
         import traceback
         traceback.print_exc()
 

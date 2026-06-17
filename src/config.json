@@ -20,9 +20,29 @@
   },
   "account_holder_last4": "5760",
   "pays_for": {
-    "Qasim": ["Tuba"]
+    "Qasim": [
+      "Tuba"
+    ]
   },
   "payment_match_months": 3,
+  "reminders": {
+    "enabled": true,
+    "first_after_days": 7,
+    "repeat_every_days": 5,
+    "dm_template": "Hi {name}! \ud83d\udc4b Friendly reminder \u2014 your share of the T-Mobile bill for {tab} is ${amount}. Whenever you get a chance:\n{methods}\nThanks so much! \ud83d\ude4f",
+    "whatsapp_numbers": {
+      "Ahmad": "12023203033",
+      "Iqra": "12027104321",
+      "Aniqa": "16145983337",
+      "Saim": "19196385426",
+      "Fatima": "18327684440",
+      "Tuba": "17633214239",
+      "Qasim": "13476337696",
+      "Muizz": "13473558019",
+      "Shahzaib": "15512167333",
+      "Waleed": "16145998507"
+    }
+  },
   "tmobile": {
     "keychain_service": "tmobile-login",
     "login_url": "https://account.t-mobile.com/signin/v2/",
@@ -46,8 +66,12 @@
   },
   "sms": {
     "chat_db_path": "~/Library/Messages/chat.db",
-    "zelle_senders": ["20736"],
-    "venmo_senders": ["86753"],
+    "zelle_senders": [
+      "20736"
+    ],
+    "venmo_senders": [
+      "86753"
+    ],
     "sms_payer_aliases": {}
   },
   "whatsapp": {

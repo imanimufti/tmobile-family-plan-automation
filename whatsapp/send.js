@@ -120,17 +120,65 @@ async function main() {
         const chats = await client.getChats();
         chats.filter((c) => c.isGroup).forEach((g) =>
           console.log(`${g.name}  [${g.id._serialized}]`));
-      } else if (cmd === 'send') {
+      } else if (cmd === 'send-batch') {
+        // Send several DMs in one session. --file points to a JSON array of
+        // {to, message, image?}. Prints "✓ DM sent to <number>" per success so
+        // the caller can record exactly who was reminded.
+        const items = JSON.parse(fs.readFileSync(args.file, 'utf8'));
+        let ok = 0;
+        for (const it of items) {
+          try {
+            const num = String(it.to).replace(/\D/g, '');
+            const id = await client.getNumberId(num);
+            if (!id) { console.log(`✗ ${num} not on WhatsApp`); continue; }
+            if (it.image) {
+              await client.sendMessage(id._serialized,
+                MessageMedia.fromFilePath(it.image), { caption: it.message || '' });
+            } else {
+              await client.sendMessage(id._serialized, it.message || '');
+            }
+            console.log(`✓ DM sent to ${num}`);
+            ok++;
+          } catch (e) {
+            console.log(`✗ ${it.to}: ${e && e.message ? e.message : e}`);
+          }
+        }
+        console.log(`Batch done: ${ok}/${items.length} sent`);
+        if (ok < items.length) { clearTimeout(guard); setTimeout(async () => { await client.destroy(); process.exit(4); }, 2000); return; }
+      } else if (cmd === 'list-members') {
         const chat = await resolveChat(client, args);
+        if (!chat.isGroup) fail('--group/--group-id must refer to a group');
+        for (const p of chat.participants) {
+          let name = '';
+          try {
+            const c = await client.getContactById(p.id._serialized);
+            name = c.name || c.pushname || '';
+          } catch (e) { /* ignore */ }
+          console.log(`${p.id.user}\t${name}`);
+        }
+      } else if (cmd === 'send') {
         const text = getMessageText(args);
+        let targetId, label;
+        if (args.to) {
+          // DM by phone number (digits only, country code included).
+          const num = String(args.to).replace(/\D/g, '');
+          const id = await client.getNumberId(num);
+          if (!id) fail(`Number ${args.to} is not on WhatsApp`);
+          targetId = id._serialized;
+          label = num;
+        } else {
+          const chat = await resolveChat(client, args);
+          targetId = chat.id._serialized;
+          label = chat.name;
+        }
         if (args.image) {
           const media = MessageMedia.fromFilePath(args.image);
-          await chat.sendMessage(media, { caption: text });
-          console.log(`✓ Sent image + caption to "${chat.name}"`);
+          await client.sendMessage(targetId, media, { caption: text });
+          console.log(`✓ Sent image + caption to "${label}"`);
         } else {
           if (!text) fail('Nothing to send (no --message/--message-file and no --image)');
-          await chat.sendMessage(text);
-          console.log(`✓ Sent message to "${chat.name}"`);
+          await client.sendMessage(targetId, text);
+          console.log(`✓ Sent message to "${label}"`);
         }
       } else {
         fail(`Unknown command "${cmd}" (use seed | list-groups | send)`);
