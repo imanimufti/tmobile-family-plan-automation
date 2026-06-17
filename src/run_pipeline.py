@@ -372,7 +372,20 @@ def main():
                         help="Payment look-back window for the monitor (default 7)")
     parser.add_argument("--skip-fetch", action="store_true",
                         help="Never attempt the T-Mobile download this run")
+    parser.add_argument("--remind-tab", default=None,
+                        help="Run ONLY the reminder stage for this tab (e.g. 'Apr 26'), then exit")
     args = parser.parse_args()
+
+    # Ad-hoc: send reminders for a specific past month, then exit.
+    if args.remind_tab:
+        from monitor_venmo_payments import PaymentMonitor
+        print(f"Reminder-only run for '{args.remind_tab}'"
+              f"{' [dry-run]' if args.dry_run else ''}")
+        monitor = PaymentMonitor()
+        monitor.authenticate("credentials.json")
+        st = load_state()
+        stage_remind(monitor, st, args.remind_tab, args.dry_run)
+        return
 
     print("=" * 64)
     print(f"Pipeline run {datetime.now().isoformat(timespec='seconds')}"
