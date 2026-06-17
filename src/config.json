@@ -49,7 +49,7 @@
     "fetch_day": 20,
     "login_url": "https://account.t-mobile.com/signin/v2/",
     "billing_url": "https://www.t-mobile.com/bill/summary",
-    "download_dir": "/Users/imanimufti/Projects/tmobile-family-plan-automation/bills",
+    "download_dir": "/Users/imanimufti/Projects/tmobile-billing-automation/bills",
     "otp_sender_pattern": "T-?Mobile|magenta|^45|^46|^90",
     "otp_max_wait_seconds": 150,
     "selectors": {
