@@ -15,7 +15,7 @@ ENV/
 
 # Google API credentials (DO NOT COMMIT!)
 credentials.json
-token.json
+token.json*
 
 # Personal data
 bills/*.pdf
