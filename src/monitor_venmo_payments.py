@@ -630,21 +630,44 @@ class PaymentMonitor:
         recent tabs, and return the subset of charges this payment settles."""
         sender_label = self._resolve_sender_label(payment)
         if not sender_label:
+            print("  ✗ No match (could not resolve sender)")
             return None
 
         names = list({c['name'] for c in charges})
         payer = self._find_payer_name(sender_label, names)
         if not payer:
+            print(f"  ✗ No match (unknown payer: {sender_label})")
             return None
 
         group = self._payer_group(payer)
-        pending = [
-            c for c in charges
-            if c['name'] in group and c['payment_status'].lower() != 'paid'
-        ]
+        group_charges = [c for c in charges if c['name'] in group]
+        pending = [c for c in group_charges if c['payment_status'].lower() != 'paid']
+        paid = [c for c in group_charges if c['payment_status'].lower() == 'paid']
+
         subset = self._best_subset(pending, payment['amount'], payer, over_tol=self.overpay_tol)
         if not subset:
+            print("  ✗ No match (no pending charge fits this amount)")
             return None
+
+        # Guard against re-applying a prior month's payment. A late payment settles
+        # in the next month's cycle, so it reappears in the look-back window after
+        # its own month is already Paid. Monthly shares differ by ~a dollar, so such
+        # a payment can fall within the round-up tolerance of a *different* pending
+        # month (e.g. a May $22.59 spilling onto June's $21.73). If the amount fits
+        # an already-settled charge strictly better than the pending one we picked,
+        # it's that settled month's payment being re-seen — don't double-apply it.
+        paid_subset = self._best_subset(paid, payment['amount'], payer, over_tol=self.overpay_tol)
+        if paid_subset is not None:
+            pend_diff = abs(payment['amount'] - sum(c['total'] for c in subset))
+            paid_diff = abs(payment['amount'] - sum(c['total'] for c in paid_subset))
+            if paid_diff < pend_diff:
+                settled = ", ".join(
+                    f"{c['name']} {c['tab_name']} (${c['total']:.2f})" for c in paid_subset
+                )
+                print(f"  ↩ Skipped: ${payment['amount']:.2f} from {payer} better matches an "
+                      f"already-settled charge ({settled}) — likely a prior month's payment "
+                      "re-seen; not re-applying")
+                return None
 
         covered = ", ".join(f"{c['name']} {c['tab_name']} (${c['total']:.2f})" for c in subset)
         print(f"  ✓ Match: ${payment['amount']:.2f} from {payer} via {payment['source']}")
@@ -692,8 +715,6 @@ class PaymentMonitor:
                     if self.update_payment_status(charge['tab_name'], charge['row_index']):
                         charge['payment_status'] = 'Paid'
                         matched += 1
-            else:
-                print("  ✗ No match (unknown payer or amount mismatch)")
 
         print(f"\n{'='*60}\nSummary: Updated {matched} charge(s)\n{'='*60}")
 
